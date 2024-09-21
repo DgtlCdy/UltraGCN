@@ -42,7 +42,9 @@ import gc
 import configparser
 import time
 import argparse
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
+
+import utils
 
 
 def data_param_prepare(config_file):
@@ -115,7 +117,7 @@ def data_param_prepare(config_file):
     params['item_num'] = item_num
 
     # mask matrix for testing to accelarate testing speed
-    mask = torch.zeros(user_num, item_num)
+    mask = torch.zeros(user_num, item_num).to('cuda')
     interacted_items = [[] for _ in range(user_num)]
     for (u, i) in train_data:
         mask[u][i] = -np.inf
@@ -131,10 +133,12 @@ def data_param_prepare(config_file):
     ii_neigh_mat_path = './' + dataset + '_ii_neighbor_mat'
     
     if os.path.exists(ii_cons_mat_path):
-        ii_constraint_mat = pload(ii_cons_mat_path)
-        ii_neighbor_mat = pload(ii_neigh_mat_path)
+        ii_constraint_mat = pload(ii_cons_mat_path).to('cuda')
+        ii_neighbor_mat = pload(ii_neigh_mat_path).to('cuda')
     else:
         ii_neighbor_mat, ii_constraint_mat = get_ii_constraint_mat(train_mat, ii_neighbor_num)
+        ii_constraint_mat = ii_neighbor_mat.to('cuda')
+        ii_neighbor_mat = ii_constraint_mat.to('cuda')
         pstore(ii_neighbor_mat, ii_neigh_mat_path)
         pstore(ii_constraint_mat, ii_cons_mat_path)
 
@@ -230,8 +234,8 @@ def load_data(train_file, test_file):
     beta_uD = (np.sqrt(users_D + 1) / users_D).reshape(-1, 1)
     beta_iD = (1 / np.sqrt(items_D + 1)).reshape(1, -1)
 
-    constraint_mat = {"beta_uD": torch.from_numpy(beta_uD).reshape(-1),
-                      "beta_iD": torch.from_numpy(beta_iD).reshape(-1)}
+    constraint_mat = {"beta_uD": torch.from_numpy(beta_uD).reshape(-1).to('cuda'),
+                      "beta_iD": torch.from_numpy(beta_iD).reshape(-1).to('cuda')}
 
     return train_data, test_data, train_mat, n_user, m_item, constraint_mat
 
@@ -392,6 +396,7 @@ def train(model, optimizer, train_loader, test_loader, mask, test_ground_truth_l
         writer = SummaryWriter()
 
     for epoch in range(params['max_epoch']):
+        utils.print_log(f'epoch: {epoch}.')
         model.train() 
         start_time = time.time()
 
@@ -413,7 +418,7 @@ def train(model, optimizer, train_loader, test_loader, mask, test_ground_truth_l
             writer.add_scalar("Loss/train_epoch", loss, epoch)
 
         need_test = True
-        if epoch < 50 and epoch % 5 != 0:
+        if epoch % 10 != 0:
             need_test = False
             
         if need_test:
@@ -423,6 +428,8 @@ def train(model, optimizer, train_loader, test_loader, mask, test_ground_truth_l
                 writer.add_scalar('Results/recall@20', Recall, epoch)
                 writer.add_scalar('Results/ndcg@20', NDCG, epoch)
             test_time = time.strftime("%H: %M: %S", time.gmtime(time.time() - start_time))
+            utils.record_test_result('C:/test_results/UltraGCN_gowalla_base.txt', epoch, Recall, NDCG)
+
             
             print('The time for epoch {} is: train time = {}, test time = {}'.format(epoch, train_time, test_time))
             print("Loss = {:.5f}, F1-score: {:5f} \t Precision: {:.5f}\t Recall: {:.5f}\tNDCG: {:.5f}".format(loss.item(), F1_score, Precision, Recall, NDCG))
@@ -515,7 +522,8 @@ def NDCGatK_r(test_data, r, k):
 
 
 def test_one_batch(X, k):
-    sorted_items = X[0].numpy()
+    # sorted_items = X[0].numpy()
+    sorted_items = X[0]
     groundTrue = X[1]
     r = getLabel(groundTrue, sorted_items)
     ret = RecallPrecision_ATk(groundTrue, r, k)
@@ -542,8 +550,7 @@ def test(model, test_loader, test_ground_truth_list, mask, topk, n_user):
         for idx, batch_users in enumerate(test_loader):
             
             batch_users = batch_users.to(model.get_device())
-            rating = model.test_foward(batch_users) 
-            rating = rating.cpu()
+            rating = model.test_foward(batch_users).to('cuda')
             rating += mask[batch_users]
             
             _, rating_K = torch.topk(rating, k=topk)
@@ -567,10 +574,11 @@ def test(model, test_loader, test_ground_truth_list, mask, topk, n_user):
 
     return F1_score, Precision, Recall, NDCG
 
+CUDA_VISIBLE_DEVICES=0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_file', type=str, help='config file path')
+    parser.add_argument('--config_file', type=str, default='./config/ultragcn_gowalla_m1.ini', help='config file path')
     args = parser.parse_args()
 
     print('###################### UltraGCN ######################')
